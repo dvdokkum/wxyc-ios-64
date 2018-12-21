@@ -1,94 +1,50 @@
+//
+//  PlaycutService.swift
+//  WXYC
+//
+//  Created by Jake Bromberg on 12/3/17.
+//  Copyright © 2017 wxyc.org. All rights reserved.
+//
+
+import Foundation
 import UIKit
 
-/// A service request will either succeed with a value or fail with an error, never both.
-public enum Result<T> {
-    case success(T)
-    case error(Error)
+public protocol NowPlayingServiceObserver: class {
+    func updateWith(playcutResult: Result<Playcut>)
+    func updateWith(artworkResult: Result<UIImage>)
+}
+
+public final class NowPlayingService {
+    private let playlistService: PlaylistService
+    private let artworkService: ArtworkService
     
-    func flatten() -> T? {
-        guard case .success(let value) = self else {
-            return nil
+    private let playcutRequest: Future<Playcut>
+    private let artworkRequest: Future<UIImage>
+
+    private let observers: [NowPlayingServiceObserver]
+    
+    public convenience init(observers: NowPlayingServiceObserver...) {
+        self.init(playlistService: PlaylistService(), artworkService: ArtworkService.shared, initialObservers: observers)
+    }
+    
+    init(playlistService: PlaylistService,
+         artworkService: ArtworkService,
+         initialObservers: [NowPlayingServiceObserver]) {
+        self.playlistService = playlistService
+        self.artworkService = artworkService
+        
+        self.observers = initialObservers
+        
+        self.playcutRequest = self.playlistService.getPlaylist().transformed { playlist in
+            return playlist.playcuts.first
         }
         
-        return value
-    }
-}
+        self.artworkRequest = self.playcutRequest.chained(with: self.artworkService.getArtwork(for:))
 
-/// `NowPlayingService` will throw one of these errors, depending
-enum ServiceErrors: Error {
-    case noResults
-    case noNewData
-    case noCachedResult
-}
-
-protocol WebSession {
-    func request(url: URL) -> Future<Data>
-}
-
-protocol Cachable {
-    subscript<Key: RawRepresentable, Value: Codable>(_ key: Key) -> Value? where Key.RawValue == String { get set }
-}
-
-/// `NowPlayingService` is responsible for retrieving the now playing
-final class NowPlayingService {
-    private var cache: Cachable
-    private let webSession: WebSession
-    
-    init(cache: Cachable = Cache.WXYC, webSession: WebSession = URLSession.shared) {
-        self.cache = cache
-        self.webSession = webSession
-    }
-    
-    func getCurrentPlaycut() -> Future<Playcut> {
-        return self.getCachedPlaycut() || self.getPlaylist().transformed(with: { playlist -> Playcut in
-            guard let playcut = playlist.playcuts.first else {
-                throw ServiceErrors.noResults
-            }
-
-            self.cache[CacheKey.playcut] = playcut
-            
-            return playcut
-        })
-    }
-    
-    private func getCachedPlaycut() -> Future<Playcut> {
-        let cachedPlaycutRequest: Future<Playcut> = self.cache.getCachedValue(key: .playcut)
+        let playcutCallbacks = initialObservers.map { $0.updateWith(playcutResult:) }
+        self.playcutRequest.observe(with: playcutCallbacks)
         
-        cachedPlaycutRequest.observe { result in
-            // We receive an error in the event that the cached record either expired or wasn't there to begin with.
-            if case .error(_) = result {
-                // We therefore need to evict the cached artwork associated with the playcut.
-                self.cache[CacheKey.artwork] = nil as Data?
-            }
-        }
-        
-        return cachedPlaycutRequest
-    }
-    
-    private func getPlaylist() -> Future<Playlist> {
-        return webSession.request(url: URL.WXYCPlaylist).transformed { data -> Playlist in
-            let decoder = JSONDecoder()
-            let playlist = try decoder.decode(Playlist.self, from: data)
-            
-            return playlist
-        }
-    }
-}
-
-extension URLSession: WebSession {
-    func request(url: URL) -> Future<Data> {
-        let promise = Promise<Data>()
-        
-        let task = dataTask(with: url) { data, _, error in
-            if let error = error {
-                promise.reject(with: error)
-            } else {
-                promise.resolve(with: data ?? Data())
-            }
-        }
-        
-        task.resume()
-        
-        return promise
+        let artworkCallbacks = initialObservers.map { $0.updateWith(artworkResult:) }
+        self.artworkRequest.observe(with: artworkCallbacks)
     }
 }

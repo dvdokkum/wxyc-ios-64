@@ -9,77 +9,88 @@
 import Foundation
 import UIKit
 
-final class ArtworkService {
-    private let cache: Cachable
-    private let session: WebSession
+public final class ArtworkService {
+    public static var shared: ArtworkService = {
+        return ArtworkService(fetchers: [
+            CachedArtworkFetcher(cache: .WXYC),
+            RemoteArtworkFetcher<DiscogsConfiguration>(),
+            RemoteArtworkFetcher<LastFMConfiguration>(),
+            RemoteArtworkFetcher<iTunesConfiguration>(),
+            DefaultArtworkFetcher()
+        ])
+    }()
     
-    init(cache: Cachable = Cache.WXYC, session: WebSession = URLSession.shared) {
+    private let fetchers: [ArtworkFetcher]
+    
+    private init(fetchers: [ArtworkFetcher]) {
+        self.fetchers = fetchers
+    }
+    
+    public func getArtwork(for playcut: Playcut) -> Future<UIImage> {
+        let (first, rest) = (self.fetchers.first!, self.fetchers.dropFirst())
+        return rest.reduce(first.getArtwork(for: playcut), { $0 || $1.getArtwork(for: playcut) })
+    }
+}
+
+protocol ArtworkFetcher {
+    func getArtwork(for playcut: Playcut) -> Future<UIImage>
+}
+
+final class CachedArtworkFetcher: ArtworkFetcher {
+    let cache: Cache
+    
+    init(cache: Cache = .WXYC) {
+        self.cache = cache
+    }
+    
+    func getArtwork(for playcut: Playcut) -> Future<UIImage> {
+        return self.cache[playcut].transformed(with: UIImage.init(data:))
+    }
+}
+
+final class DefaultArtworkFetcher: ArtworkFetcher {
+    func getArtwork(for playcut: Playcut) -> Future<UIImage> {
+        return Promise(value: #imageLiteral(resourceName: "logo"))
+    }
+}
+
+protocol RemoteArtworkFetcherConfiguration {
+    static func makeSearchURL(for playcut: Playcut) -> URL
+    static func extractURL(from data: Data) throws -> URL
+}
+
+final class RemoteArtworkFetcher<Configuration: RemoteArtworkFetcherConfiguration>: ArtworkFetcher {
+    let session: WebSession
+    let cache: Cache
+    
+    init(cache: Cache = .WXYC, session: WebSession = URLSession.shared) {
         self.cache = cache
         self.session = session
     }
     
     func getArtwork(for playcut: Playcut) -> Future<UIImage> {
-        return self.getCachedArtwork()
-            || self.getNetworkArtwork(for: playcut)
-            || self.getDefaultArtwork()
-    }
-    
-    private func getCachedArtwork() -> Future<UIImage> {
-        let dataRequest: Future<Data> = self.cache.getCachedValue(key: .artwork)
-        let imageRequest: Future<UIImage> =  dataRequest.transformed(with: UIImage.init)
+        let searchURLRequest = Configuration.makeSearchURL(for: playcut)
+        let imageURLRequest = self.session.request(url: searchURLRequest)
+            .transformed(with: Configuration.extractURL(from:))
+        let downloadImageRequest = imageURLRequest.chained(with: self.getArtwork(at:))
         
-        return imageRequest
-    }
-    
-    private func getNetworkArtwork(for playcut: Playcut) -> Future<UIImage> {
-        let urlRequest = self.getArtworkURL(for: playcut)
-        let imageRequest = urlRequest.chained(with: self.getArtwork(at:))
-        
-        imageRequest.onSuccess { image in
-            Cache.WXYC[CacheKey.artwork] = image.pngData()
-        }
-        
-        return imageRequest
-    }
-    
-    private func getArtworkURL(for playcut: Playcut) -> Future<URL> {
-        return self.getLastFMArtworkURL(for: playcut) || self.getItunesArtworkURL(for: playcut)
-    }
-    
-    private func getDefaultArtwork() -> Future<UIImage> {
-        return Promise(value: #imageLiteral(resourceName: "logo"))
+        return downloadImageRequest
     }
     
     private func getArtwork(at url: URL) -> Future<UIImage> {
-        return self.session.request(url: url)
-            .chained(with: { data -> Future<UIImage> in
-                return Promise(value: UIImage(data: data))
-            })
-    }
-    
-    private func getItunesArtworkURL(for playcut: Playcut) -> Future<URL> {
-        let url = iTunes.searchURL(for: playcut)
-        return self.session.request(url: url)
-            .transformed(with: { data -> URL in
-                let decoder = JSONDecoder()
-                let results = try decoder.decode(iTunes.SearchResults.self, from: data)
-                
-                if let item = results.results.first {
-                    return item.artworkUrl100
-                } else {
+        let imageRequest = self.session.request(url: url)
+            .transformed(with: { data -> UIImage in
+                guard let image = UIImage(data: data) else {
                     throw ServiceErrors.noResults
                 }
-            })
-    }
-    
-    private func getLastFMArtworkURL(for playcut: Playcut) -> Future<URL> {
-        let lastFMURL = LastFM.searchURL(for: playcut)
-        return self.session.request(url: lastFMURL)
-            .transformed(with: { data -> URL in
-                let decoder = JSONDecoder()
-                let searchResponse = try decoder.decode(LastFM.SearchResponse.self, from: data)
                 
-                return searchResponse.album.largestAlbumArt.url
+                return image
             })
+        
+        imageRequest.onSuccess { image in
+            self.cache[url] = image.pngData()
+        }
+        
+        return imageRequest
     }
 }

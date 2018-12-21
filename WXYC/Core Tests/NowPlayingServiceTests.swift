@@ -123,7 +123,7 @@ final class TestCache: Cachable {
     }
 }
 
-final class TestPlaylistServiceObserver: PlaylistServiceObserver {
+final class TestNowPlayingServiceObserver: NowPlayingServiceObserver {
     var playcutResult: Result<Playcut>?
     var artworkResult: Result<UIImage>?
 
@@ -157,7 +157,7 @@ class NowPlayingServiceTests: XCTestCase {
             webSession: webSession
         )
         
-        nowPlayingService.getCurrentPlaycut().observe { result in
+        nowPlayingService.getPlaycut().observe { result in
             guard case .success(let playcut) = result else {
                 fatalError()
             }
@@ -176,25 +176,33 @@ class NowPlayingServiceTests: XCTestCase {
             webSession: webSession
         )
         
-        _ = nowPlayingService.getCurrentPlaycut()
+        _ = nowPlayingService.getPlaycut()
     }
     
     func testGettingTwoDifferentPlaycuts() {
-        let playlistObserver = TestPlaylistServiceObserver()
+        let playcutObserver = TestNowPlayingServiceObserver()
 
         let nowPlayingService = self.createNowPlayingService()
-        _ = PlaylistService(
+        _ = nowPlayingService(
             service: nowPlayingService,
             artworkService: ArtworkService(),
-            initialObservers: [playlistObserver]
+            initialObservers: [playcutObserver]
         )
 
-        _ = nowPlayingService.getCurrentPlaycut()
+        _ = nowPlayingService.getPlaycut()
         
-        let playcut = playlistObserver.playcutResult?.flatten()
-        XCTAssertNotEqual(playcut?.songTitle, RadioStation.WXYC.name)
-        XCTAssertNotEqual(playcut?.songTitle, RadioStation.WXYC.secondaryName)
+        guard let playcutResult = playcutObserver.playcutResult else {
+            XCTFail()
+            return
+        }
+        
+        guard case .success(let playcut) = playcutResult else {
+            XCTFail()
+            return
+        }
 
+        XCTAssertNotEqual(playcut.songTitle, RadioStation.WXYC.name)
+        XCTAssertNotEqual(playcut.songTitle, RadioStation.WXYC.secondaryName)
     }
     
     func createNowPlayingService() -> NowPlayingService {
@@ -213,7 +221,7 @@ class NowPlayingServiceTests: XCTestCase {
         return nowPlayingService
     }
     
-    func testExpiredCacheWithSamePlaylistResult() {
+    func testExpiredCacheWithSamePlaycutResult() {
         
     }
 }
